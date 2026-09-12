@@ -157,6 +157,101 @@ def predict_from_lambda(lam: float, mu: float, rho: float) -> dict:
             "xG_home": float(lam), "xG_away": float(mu)}
 
 
+def market_probs(M: np.ndarray) -> dict:
+    """Tutte le probabilita' derivabili dalla stessa matrice dei punteggi:
+    1X2, doppia chance, Under/Over su piu' linee, Multigol, Gol/NoGol,
+    handicap asiatico semplice, punteggio esatto piu' probabile."""
+    n = M.shape[0]
+    tot = np.add.outer(np.arange(n), np.arange(n))
+    diff = np.subtract.outer(np.arange(n), np.arange(n))  # gol casa - gol trasferta
+
+    pH = M[diff > 0].sum(); pD = M[diff == 0].sum(); pA = M[diff < 0].sum()
+
+    out = {
+        "1X2": {"1": float(pH), "X": float(pD), "2": float(pA)},
+        "doppia_chance": {"1X": float(pH + pD), "X2": float(pD + pA), "12": float(pH + pA)},
+        "under_over": {},
+        "multigol": {},
+        "gol_nogol": {
+            "GG": float(M[(np.arange(n)[:, None] > 0) & (np.arange(n)[None, :] > 0)].sum()),
+        },
+        "handicap": {},
+    }
+    out["gol_nogol"]["NG"] = 1 - out["gol_nogol"]["GG"]
+
+    for line in [0.5, 1.5, 2.5, 3.5, 4.5]:
+        over = float(M[tot > line].sum())
+        out["under_over"][f"O{line}"] = over
+        out["under_over"][f"U{line}"] = 1 - over
+
+    mg_ranges = [(1, 3), (2, 4), (2, 5), (0, 1), (4, 6)]
+    for lo, hi in mg_ranges:
+        out["multigol"][f"{lo}-{hi}"] = float(M[(tot >= lo) & (tot <= hi)].sum())
+
+    for h in [-1.5, -1.0, -0.5, 0.5, 1.0, 1.5]:
+        # handicap asiatico sulla squadra di casa: vince se (gol_casa + h) > gol_trasferta
+        adj = diff + h
+        win = float(M[adj > 0].sum())
+        push = float(M[adj == 0].sum()) if h in (-1.0, 1.0) else 0.0
+        lose = 1 - win - push
+        out["handicap"][f"casa {h:+.1f}"] = {"vince": win, "push": push, "perde": lose}
+
+    top_idx = np.dstack(np.unravel_index(np.argsort(-M, axis=None)[:5], M.shape))[0]
+    out["punteggi_esatti"] = [{"risultato": f"{i}-{j}", "p": float(M[i, j])} for i, j in top_idx]
+    return out
+
+
+def _candidates(mp: dict) -> list:
+    candidates = []
+    for k, v in mp["1X2"].items():
+        candidates.append((f"1X2: {k}", v, 1))
+    for k, v in mp["doppia_chance"].items():
+        candidates.append((f"Doppia chance: {k}", v, 1))
+    for k, v in mp["under_over"].items():
+        if k in ("O2.5", "U2.5", "O1.5", "U1.5"):
+            candidates.append((k, v, 1))
+    candidates.append(("Gol (GG)", mp["gol_nogol"]["GG"], 2))
+    candidates.append(("No Gol (NG)", mp["gol_nogol"]["NG"], 2))
+    for k, v in mp["multigol"].items():
+        candidates.append((f"Multigol {k}", v, 2))
+    for k, v in mp["handicap"].items():
+        candidates.append((f"Handicap {k}", v["vince"], 3))
+    return candidates
+
+
+def most_probable_pick(mp: dict) -> dict:
+    """L'esito piu' probabile in assoluto tra i mercati principali, qualunque
+    sia la sua quota (puo' essere un evento quasi scontato a quota bassa) —
+    diverso da wisest_pick, che invece cerca una quota vicina a 2. Esclude gli
+    handicap: tecnicamente spesso i piu' probabili in assoluto, ma poco
+    leggibili come 'pronostico' nel senso comune del termine."""
+    candidates = [c for c in _candidates(mp) if c[2] < 3]
+    candidates.sort(key=lambda c: (-c[1], c[2]))
+    best = candidates[0]
+    return {"mercato": best[0], "probabilita": best[1],
+            "quota_equa_stimata": (1 / best[1]) if best[1] > 0 else None}
+
+
+def wisest_pick(mp: dict, odds_target: tuple = (1.8, 2.3)) -> dict:
+    """Tra tutti i mercati derivabili dalla matrice, sceglie quello con la
+    probabilita' del modello piu' vicina alla fascia di quota richiesta
+    (default 1.80-2.30, cioe' 'circa quota 2'), preferendo mercati semplici
+    e leggibili (1X2, doppia chance, O/U, GG/NG, multigol) alle combinazioni
+    piu' esotiche (handicap, punteggio esatto), che restano come riserva."""
+    lo_p, hi_p = 1 / odds_target[1], 1 / odds_target[0]  # banda di probabilita' equivalente
+    candidates = _candidates(mp)
+    in_band = [c for c in candidates if lo_p <= c[1] <= hi_p]
+    pool = in_band if in_band else candidates
+    # tra quelli in fascia: probabilita' piu' alta prima, poi mercati piu' semplici (tier piu' basso)
+    pool.sort(key=lambda c: (-c[1], c[2]))
+    best = pool[0]
+    quota_equa = 1 / best[1] if best[1] > 0 else None
+    return {
+        "mercato": best[0], "probabilita": best[1], "quota_equa_stimata": quota_equa,
+        "in_fascia_richiesta": bool(in_band),
+    }
+
+
 def novig(*odds):
     """Probabilità implicite senza margine (normalizzazione proporzionale)."""
     inv = np.array([1.0 / o for o in odds])
