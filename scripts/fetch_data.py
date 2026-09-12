@@ -67,12 +67,13 @@ def fetch_odds(today: datetime) -> None:
         print("[odds] ODDS_API_KEY assente: salto le quote")
         return
     url = "https://api.the-odds-api.com/v4/sports/soccer_italy_serie_a/odds"
+    # Bet365 sta nella regione "uk", Pinnacle in "eu". Senza filtro bookmaker
+    # arrivano tutti i book delle due regioni: 2 mercati x 2 regioni = 4 crediti.
     params = {
         "apiKey": key,
-        "regions": "eu",
+        "regions": "eu,uk",
         "markets": "h2h,totals",
         "oddsFormat": "decimal",
-        "bookmakers": "bet365,pinnacle",
         "dateFormat": "iso",
     }
     r = requests.get(url, params=params, timeout=60)
